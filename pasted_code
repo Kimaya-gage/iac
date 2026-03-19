@@ -2,14 +2,15 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# Data source to fetch the latest Amazon Linux 2 AMI
+# --- Data Source to find the latest Amazon Linux 2 AMI ---
+# This ensures you're using a recent, patched operating system image.
 data "aws_ami" "amazon_linux_2" {
   most_recent = true
   owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["amzn2-ami-kernel-5.10-hvm-2.0.*-x86_64-gp2"]
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
   }
 
   filter {
@@ -18,92 +19,119 @@ data "aws_ami" "amazon_linux_2" {
   }
 }
 
-# Resource: Security Group for the EC2 instance
-resource "aws_security_group" "myec2_sg" {
-  name        = "my-ec2-instance-sg"
-  description = "Allow SSH and restrict outbound access"
+# --- Create an SSH Key Pair for secure administrative access ---
+# The private key generated here should be stored securely and never exposed.
+resource "tls_private_key" "myec2_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
 
-  # Ingress rule: Allow SSH from a specific IP (or 0.0.0.0/0 for example)
-  # For production, replace "0.0.0.0/0" with a specific IP range (e.g., your office IP)
+resource "aws_key_pair" "myec2_key" {
+  key_name   = "myec2-key-${var.environment}"
+  public_key = tls_private_key.myec2_key.public_key_openssh
+}
+
+# --- Data Source to reference the default VPC ---
+# Needed to associate security groups if a custom VPC is not defined.
+data "aws_vpc" "default" {
+  default = true
+}
+
+# --- Define a Security Group for the EC2 instance with least privilege ---
+# This controls network access to and from the instance.
+resource "aws_security_group" "myec2_sg" {
+  name        = "myec2-security-group-${var.environment}"
+  description = "Security group for my EC2 instance with restricted access"
+  vpc_id      = data.aws_vpc.default.id
+
+  # Ingress rule: Allow SSH access (port 22) from a specific IP range.
+  # CRITICAL: Replace "YOUR_MANAGEMENT_IP_CIDR" with your actual public IP CIDR (e.g., "X.X.X.X/32").
+  # Allowing "0.0.0.0/0" for SSH is highly discouraged for production environments.
+  # Consider using AWS Systems Manager Session Manager for SSH-less access to avoid opening port 22 entirely.
   ingress {
+    description = "SSH from trusted network"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # ⚠️ IMPORTANT: Restrict this to your specific IP range in production
-    description = "Allow SSH from anywhere (for demo)"
+    cidr_blocks = ["YOUR_MANAGEMENT_IP_CIDR"] # Placeholder for security. Update this!
   }
 
-  # Egress rule: Allow all outbound traffic (can be restricted further)
+  # If this instance is meant to be a web server, uncomment and configure HTTP/HTTPS rules:
+  /*
+  ingress {
+    description = "HTTP access from internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    description = "HTTPS access from internet"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  */
+
+  # Egress rule: Allow all outbound traffic.
+  # Restrict this further if your application has specific outbound requirements.
   egress {
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"
+    protocol    = "-1" # Represents all protocols
     cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound traffic"
   }
 
   tags = {
-    Name = "my-ec2-instance-sg"
+    Name = "myec2-security-group-${var.environment}"
   }
 }
 
-# Resource: IAM Role for the EC2 instance
-# This role allows the EC2 instance to send logs to CloudWatch
-resource "aws_iam_role" "ec2_instance_role" {
-  name               = "my-ec2-instance-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [
-      {
-        Action    = "sts:AssumeRole"
-        Effect    = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      },
-    ]
-  })
-
-  tags = {
-    Name = "my-ec2-instance-role"
-  }
-}
-
-# Attach a managed policy to the IAM role
-resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_agent_policy" {
-  role       = aws_iam_role.ec2_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-
-# Resource: IAM Instance Profile
-resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "my-ec2-instance-profile"
-  role = aws_iam_role.ec2_instance_role.name
-}
-
-# Resource: EC2 Instance
+# --- EC2 Instance definition ---
 resource "aws_instance" "myec2" {
-  ami           = data.aws_ami.amazon_linux_2.id # Dynamically get the latest valid Amazon Linux 2 AMI
-  instance_type = "t2.micro"
-
-  # Attach the newly created security group
-  vpc_security_group_ids = [aws_security_group.myec2_sg.id]
-
-  # Enable encryption for the root EBS volume
-  root_block_device {
-    encrypted = true
-  }
-
-  # Attach the IAM instance profile for secure AWS service access
-  iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
+  ami           = data.aws_ami.amazon_linux_2.id        # Use the latest secure AMI
+  instance_type = "t2.micro"                            # Instance type as specified
+  key_name      = aws_key_pair.myec2_key.key_name       # Associate the SSH key pair
+  vpc_security_group_ids = [aws_security_group.myec2_sg.id] # Associate the restrictive security group
+  
+  # Explicitly control public IP assignment.
+  # Set to 'true' if the instance needs a public IP (e.g., web server).
+  # Set to 'false' for instances in private subnets or that only need private IP.
+  associate_public_ip_address = true # Set to false if not needed, use private subnet for better security
 
   tags = {
-    Name = "my-secure-ec2-instance" # Fixed missing quotes
+    Name = "my-ec2-instance-${var.environment}" # Fix syntax: string in quotes, add uniqueness
   }
 }
 
-# Output: Display the public IP of the instance
-output "instance_ip" {
-  value       = aws_instance.myec2.public_ip # Fixed typo in attribute name
+# --- Outputs ---
+# CRITICAL: The private key should be stored securely, not output directly in production.
+# Marking as sensitive prevents it from being displayed in Terraform output.
+output "generated_private_key_pem" {
+  value       = tls_private_key.myec2_key.private_key_pem
+  sensitive   = true
+  description = "The generated private key for SSH access. Store securely and do not expose."
+}
+
+output "instance_public_ip" {
+  value       = aws_instance.myec2.public_ip # Fix typo: public_ippp -> public_ip
   description = "The public IP address of the EC2 instance."
+}
+
+output "instance_private_ip" {
+  value       = aws_instance.myec2.private_ip
+  description = "The private IP address of the EC2 instance."
+}
+
+output "public_key_openssh" {
+  value       = tls_private_key.myec2_key.public_key_openssh
+  description = "The generated public key in OpenSSH format."
+}
+
+# --- Variables ---
+variable "environment" {
+  description = "Deployment environment (e.g., dev, prod) for resource naming."
+  type        = string
+  default     = "dev"
 }
