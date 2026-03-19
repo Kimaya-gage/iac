@@ -2,14 +2,15 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# Data source to fetch the latest Amazon Linux 2 AMI
+# Data source to dynamically fetch the latest Amazon Linux 2 AMI for the specified region.
+# This ensures the AMI is always valid and up-to-date, improving deployment reliability.
 data "aws_ami" "amazon_linux_2" {
   most_recent = true
   owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["amzn2-ami-kernel-5.10-hvm-2.0.*-x86_64-gp2"]
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
   }
 
   filter {
@@ -18,92 +19,21 @@ data "aws_ami" "amazon_linux_2" {
   }
 }
 
-# Resource: Security Group for the EC2 instance
-resource "aws_security_group" "myec2_sg" {
-  name        = "my-ec2-instance-sg"
-  description = "Allow SSH and restrict outbound access"
-
-  # Ingress rule: Allow SSH from a specific IP (or 0.0.0.0/0 for example)
-  # For production, replace "0.0.0.0/0" with a specific IP range (e.g., your office IP)
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # ⚠️ IMPORTANT: Restrict this to your specific IP range in production
-    description = "Allow SSH from anywhere (for demo)"
-  }
-
-  # Egress rule: Allow all outbound traffic (can be restricted further)
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound traffic"
-  }
-
-  tags = {
-    Name = "my-ec2-instance-sg"
-  }
-}
-
-# Resource: IAM Role for the EC2 instance
-# This role allows the EC2 instance to send logs to CloudWatch
-resource "aws_iam_role" "ec2_instance_role" {
-  name               = "my-ec2-instance-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [
-      {
-        Action    = "sts:AssumeRole"
-        Effect    = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      },
-    ]
-  })
-
-  tags = {
-    Name = "my-ec2-instance-role"
-  }
-}
-
-# Attach a managed policy to the IAM role
-resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_agent_policy" {
-  role       = aws_iam_role.ec2_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-
-# Resource: IAM Instance Profile
-resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "my-ec2-instance-profile"
-  role = aws_iam_role.ec2_instance_role.name
-}
-
-# Resource: EC2 Instance
 resource "aws_instance" "myec2" {
-  ami           = data.aws_ami.amazon_linux_2.id # Dynamically get the latest valid Amazon Linux 2 AMI
+  ami           = data.aws_ami.amazon_linux_2.id # Fix: Using a dynamically fetched, valid AMI ID.
   instance_type = "t2.micro"
 
-  # Attach the newly created security group
-  vpc_security_group_ids = [aws_security_group.myec2_sg.id]
-
-  # Enable encryption for the root EBS volume
-  root_block_device {
-    encrypted = true
-  }
-
-  # Attach the IAM instance profile for secure AWS service access
-  iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
-
   tags = {
-    Name = "my-secure-ec2-instance" # Fixed missing quotes
+    Name = "my-ec2-instance"   # Fix: Enclosed the string value in double quotes.
   }
+
+  # In a real-world scenario, you would typically attach a key_name for SSH access
+  # and define a specific 'vpc_security_group_ids' to control network access,
+  # rather than relying on the default VPC security group.
+  # For this specific fix, we only address the identified vulnerabilities.
 }
 
-# Output: Display the public IP of the instance
 output "instance_ip" {
-  value       = aws_instance.myec2.public_ip # Fixed typo in attribute name
+  value       = aws_instance.myec2.public_ip   # Fix: Corrected the attribute name from public_ippp to public_ip.
   description = "The public IP address of the EC2 instance."
 }
