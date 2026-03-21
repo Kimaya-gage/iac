@@ -1,109 +1,40 @@
-provider "aws" {
-  region = "us-east-1"
-}
+resource "aws_s3_bucket" "secure_bucket" {
+  bucket = "my-secure-bucket-123"
 
-# Data source to fetch the latest Amazon Linux 2 AMI
-data "aws_ami" "amazon_linux_2" {
-  most_recent = true
-  owners      = ["amazon"]
+  # Ensure the bucket is private by default
+  acl = "private"
 
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-kernel-5.10-hvm-2.0.*-x86_64-gp2"]
+  # Enable versioning to protect against accidental deletions and overwrites
+  versioning {
+    enabled = true
   }
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
-# Resource: Security Group for the EC2 instance
-resource "aws_security_group" "myec2_sg" {
-  name        = "my-ec2-instance-sg"
-  description = "Allow SSH and restrict outbound access"
-
-  # Ingress rule: Allow SSH from a specific IP (or 0.0.0.0/0 for example)
-  # For production, replace "0.0.0.0/0" with a specific IP range (e.g., your office IP)
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # ⚠️ IMPORTANT: Restrict this to your specific IP range in production
-    description = "Allow SSH from anywhere (for demo)"
+  # Enforce server-side encryption for all objects at rest (using S3-managed keys by default)
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
   }
 
-  # Egress rule: Allow all outbound traffic (can be restricted further)
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound traffic"
-  }
-
+  # Optional: Add tags for better resource management and cost allocation
   tags = {
-    Name = "my-ec2-instance-sg"
+    Environment = "Production"
+    Project     = "SecureStorage"
   }
 }
 
-# Resource: IAM Role for the EC2 instance
-# This role allows the EC2 instance to send logs to CloudWatch
-resource "aws_iam_role" "ec2_instance_role" {
-  name               = "my-ec2-instance-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [
-      {
-        Action    = "sts:AssumeRole"
-        Effect    = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      },
-    ]
-  })
+resource "aws_s3_bucket_public_access_block" "secure_block" {
+  bucket = aws_s3_bucket.secure_bucket.id
 
-  tags = {
-    Name = "my-ec2-instance-role"
-  }
-}
-
-# Attach a managed policy to the IAM role
-resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_agent_policy" {
-  role       = aws_iam_role.ec2_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-
-# Resource: IAM Instance Profile
-resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "my-ec2-instance-profile"
-  role = aws_iam_role.ec2_instance_role.name
-}
-
-# Resource: EC2 Instance
-resource "aws_instance" "myec2" {
-  ami           = data.aws_ami.amazon_linux_2.id # Dynamically get the latest valid Amazon Linux 2 AMI
-  instance_type = "t2.micro"
-
-  # Attach the newly created security group
-  vpc_security_group_ids = [aws_security_group.myec2_sg.id]
-
-  # Enable encryption for the root EBS volume
-  root_block_device {
-    encrypted = true
-  }
-
-  # Attach the IAM instance profile for secure AWS service access
-  iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
-
-  tags = {
-    Name = "my-secure-ec2-instance" # Fixed missing quotes
-  }
-}
-
-# Output: Display the public IP of the instance
-output "instance_ip" {
-  value       = aws_instance.myec2.public_ip # Fixed typo in attribute name
-  description = "The public IP address of the EC2 instance."
+  # Crucially, all public access blocking mechanisms must be enabled
+  # block_public_acls: Block new public ACLs and updating any existing ones to be public
+  block_public_acls = true
+  # block_public_policy: Block new public bucket policies and updating any existing ones to be public
+  block_public_policy = true
+  # ignore_public_acls: Ignore all public ACLs (granting access only through bucket policies, if allowed)
+  ignore_public_acls = true
+  # restrict_public_buckets: Restrict public bucket policies for buckets that also have public ACLs
+  restrict_public_buckets = true
 }
