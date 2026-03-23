@@ -1,25 +1,18 @@
-variable "aws_region" {
-  description = "AWS region for resources"
-  type        = string
-  default     = "us-east-1"
-}
-
 provider "aws" {
-  region = var.aws_region
-  # AWS credentials should be managed via environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY),
-  # shared credentials file (~/.aws/credentials), or IAM roles for EC2 instances/Lambda functions.
-  # Hardcoding them here is a CRITICAL security vulnerability and has been removed.
+  # access_key and secret_key removed. 
+  # Authentication should rely on environment variables, shared credential files, 
+  # IAM roles, or AWS CLI profiles for enhanced security.
+  region = "us-east-1"
 }
 
-# --- VPC, Subnets & Network Setup ---
-# A dedicated VPC is a best practice for resource isolation.
+# --- VPC and Networking Setup (Required for secure EC2 and RDS) ---
 resource "aws_vpc" "main" {
-  cidr_block = "10.0.0.0/16"
+  cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = {
-    Name = "secure-vpc"
+    Name = "secure-app-vpc"
   }
 }
 
@@ -27,29 +20,45 @@ resource "aws_internet_gateway" "gw" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "secure-gw"
+    Name = "secure-app-igw"
   }
 }
 
 resource "aws_subnet" "public" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.1.0/24"
-  availability_zone = "${var.aws_region}a"
-  map_public_ip_on_launch = true
+  availability_zone = "us-east-1a"
 
   tags = {
-    Name = "secure-public-subnet"
+    Name = "secure-app-public-subnet"
   }
 }
 
 resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.2.0/24"
-  availability_zone = "${var.aws_region}a"
+  availability_zone = "us-east-1a"
 
   tags = {
-    Name = "secure-private-subnet"
+    Name = "secure-app-private-subnet"
   }
+}
+
+resource "aws_eip" "nat_eip" {
+  domain = "vpc"
+  tags = {
+    Name = "secure-app-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.public.id
+
+  tags = {
+    Name = "secure-app-nat-gw"
+  }
+  depends_on = [aws_internet_gateway.gw]
 }
 
 resource "aws_route_table" "public" {
@@ -61,36 +70,45 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "public-route-table"
+    Name = "secure-app-public-rt"
   }
 }
 
-resource "aws_route_table_association" "public_subnet_association" {
+resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
-# --- S3 Bucket: Secure Configuration ---
-# ✅ S3 Bucket with Block Public Access, Encryption, Versioning, and Logging
-resource "aws_s3_bucket" "secure_bucket" {
-  bucket = "my-secure-bucket-${random_id.bucket_suffix.hex}" # Unique bucket name
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
 
-  # Enforce private access by default - block all public access
-  # ACLs are generally discouraged in favor of S3 Block Public Access and Bucket Policies.
-  acl = "private" # Ensure it's explicitly private, or rely solely on public access block.
+  route {
+    cidr_block = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
 
   tags = {
-    Name        = "my-secure-data-bucket"
-    Environment = "Dev"
+    Name = "secure-app-private-rt"
   }
 }
 
-# Ensure the bucket name is unique
-resource "random_id" "bucket_suffix" {
-  byte_length = 8
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
 }
 
-# ✅ Block Public Access (CRITICAL fix)
+# --- Secure S3 Bucket ---
+# ✅ S3 Bucket: Not public, encrypted, versioned
+resource "aws_s3_bucket" "secure_bucket" {
+  bucket = "my-secure-application-bucket"
+
+  tags = {
+    Name        = "MySecureAppBucket"
+    Environment = "Production"
+  }
+}
+
+# Enforce all public access blocks
 resource "aws_s3_bucket_public_access_block" "secure_bucket_public_access_block" {
   bucket = aws_s3_bucket.secure_bucket.id
 
@@ -100,55 +118,9 @@ resource "aws_s3_bucket_public_access_block" "secure_bucket_public_access_block"
   restrict_public_buckets = true
 }
 
-# ✅ Server-Side Encryption (HIGH fix)
+# Enforce server-side encryption with S3-managed keys (SSE-S3)
 resource "aws_s3_bucket_server_side_encryption_configuration" "secure_bucket_sse" {
   bucket = aws_s3_bucket.secure_bucket.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256" # Use AES256 or KMS
-    }
-  }
-}
-
-# ✅ Versioning (MEDIUM fix)
-resource "aws_s3_bucket_versioning" "secure_bucket_versioning" {
-  bucket = aws_s3_bucket.secure_bucket.id
-  configuration {
-    status = "Enabled"
-  }
-}
-
-# ✅ Dedicated S3 bucket for logging
-resource "aws_s3_bucket" "logging_bucket" {
-  bucket = "my-secure-logging-bucket-${random_id.logging_bucket_suffix.hex}"
-  acl    = "log-delivery-write" # Required for S3 access logging target
-  force_destroy = true # Be careful with this in production
-
-  tags = {
-    Name        = "my-secure-logging-bucket"
-    Environment = "Dev"
-  }
-}
-
-# Ensure the logging bucket name is unique
-resource "random_id" "logging_bucket_suffix" {
-  byte_length = 8
-}
-
-# Block public access for the logging bucket too
-resource "aws_s3_bucket_public_access_block" "logging_bucket_public_access_block" {
-  bucket = aws_s3_bucket.logging_bucket.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# Enable default encryption for the logging bucket
-resource "aws_s3_bucket_server_side_encryption_configuration" "logging_bucket_sse" {
-  bucket = aws_s3_bucket.logging_bucket.id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -157,232 +129,284 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "logging_bucket_ss
   }
 }
 
-# ✅ S3 Bucket Access Logging (MEDIUM fix)
+# Enable versioning for data recovery and audit
+resource "aws_s3_bucket_versioning" "secure_bucket_versioning" {
+  bucket = aws_s3_bucket.secure_bucket.id
+  configuration {
+    status = "Enabled"
+  }
+}
+
+# Set object ownership to BucketOwnerEnforced to disable ACLs
+resource "aws_s3_bucket_ownership_controls" "secure_bucket_ownership_controls" {
+  bucket = aws_s3_bucket.secure_bucket.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+# --- Secure S3 Logging Bucket ---
+resource "aws_s3_bucket" "log_bucket" {
+  bucket = "my-secure-application-log-bucket"
+
+  tags = {
+    Name        = "MySecureAppLogBucket"
+    Environment = "Production"
+    Purpose     = "AccessLogs"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "log_bucket_public_access_block" {
+  bucket = aws_s3_bucket.log_bucket.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_acl" "log_bucket_acl" {
+  depends_on = [aws_s3_bucket_public_access_block.log_bucket_public_access_block]
+  bucket     = aws_s3_bucket.log_bucket.id
+  acl        = "log-delivery-write"
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "log_bucket_sse" {
+  bucket = aws_s3_bucket.log_bucket.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# ✅ S3 Logging: Enabled and targets a secure logging bucket
 resource "aws_s3_bucket_logging" "secure_bucket_logging" {
   bucket        = aws_s3_bucket.secure_bucket.id
-  target_bucket = aws_s3_bucket.logging_bucket.id
+  target_bucket = aws_s3_bucket.log_bucket.id
   target_prefix = "log/"
 }
 
-# --- Security Group: Least Privilege ---
-# ✅ Security Group with restricted ingress/egress
-resource "aws_security_group" "secure_sg" {
-  name        = "secure_sg"
-  description = "Allow inbound traffic for application and outbound for necessary services"
+# --- Security Groups ---
+# ✅ Security Group for EC2: Least privilege ingress/egress
+resource "aws_security_group" "ec2_sg" {
+  name        = "secure_ec2_sg"
+  description = "Allow SSH from specific IP and restricted egress"
   vpc_id      = aws_vpc.main.id
 
-  # ✅ Restricted Ingress: Allow SSH from specific IPs only (replace with your IP)
+  # Ingress: Allow SSH from a specific, trusted IP range (replace with your IP or a bastion host SG)
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    # WARNING: This is still open to '0.0.0.0/0' for illustration. In production, this must be YOUR_TRUSTED_IP_CIDR.
-    # Replace "0.0.0.0/0" with your actual trusted IP address in CIDR notation (e.g., "203.0.113.45/32")
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow SSH from trusted IPs (update for production)"
+    cidr_blocks = ["0.0.0.0/0"] # REMINDER: Replace with your actual trusted IP range (e.g., your_office_ip/32)!
   }
 
-  # Add an example ingress rule for application traffic (e.g., HTTP/HTTPS from a load balancer)
-  # ingress {
-  #   from_port   = 80
-  #   to_port     = 80
-  #   protocol    = "tcp"
-  #   cidr_blocks = ["0.0.0.0/0"] # Example from anywhere for web servers, but restrict to LB or specific IPs
-  #   description = "Allow HTTP access"
-  # }
-  # ingress {
-  #   from_port   = 443
-  #   to_port     = 443
-  #   protocol    = "tcp"
-  #   cidr_blocks = ["0.0.0.0/0"] # Example from anywhere for web servers, but restrict to LB or specific IPs
-  #   description = "Allow HTTPS access"
-  # }
-
-
-  # ✅ Restricted Egress: Allow only necessary outbound connections (e.g., HTTPS)
-  egress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Allow outbound HTTPS to anywhere
-    description = "Allow outbound HTTPS"
-  }
+  # Egress: Allow outbound for common services like DNS, HTTP/HTTPS for updates/patches
   egress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Allow outbound HTTP (if needed for updates/repos)
-    description = "Allow outbound HTTP"
+    cidr_blocks = ["0.0.0.0/0"]
   }
-  # Consider adding egress for DNS (53 UDP/TCP) if instances need to resolve external domains.
-  # Otherwise, deny all other outbound traffic for least privilege.
+  egress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   tags = {
-    Name = "secure-app-sg"
+    Name = "secure_ec2_sg"
   }
 }
 
-# --- EC2 Instance: Secure Configuration ---
-# ✅ EC2 instance with tags, dedicated security group, and latest AMI
-data "aws_ami" "amazon_linux_2" {
-  owners      = ["amazon"]
-  most_recent = true
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+# ✅ Security Group for RDS: Allow DB traffic only from EC2 SG, no public access
+resource "aws_security_group" "rds_sg" {
+  name        = "secure_rds_sg"
+  description = "Allow DB access only from EC2 security group"
+  vpc_id      = aws_vpc.main.id
+
+  # Ingress: Allow MySQL/Aurora port from the EC2 security group only
+  ingress {
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ec2_sg.id]
   }
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+
+  # No explicit egress needed, AWS default allows all outbound which is often acceptable for databases 
+  # or could be further restricted if necessary.
+
+  tags = {
+    Name = "secure_rds_sg"
   }
 }
 
+# --- IAM Role and Instance Profile for EC2 ---
+# ✅ IAM Role for EC2: Least privilege (e.g., S3 Read-Only)
+resource "aws_iam_role" "ec2_role" {
+  name               = "secure_ec2_role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      },
+    ]
+  })
+
+  tags = {
+    Name = "secure_ec2_role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "s3_read_only" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" # Example: Read-only access to S3
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "secure_ec2_profile"
+  role = aws_iam_role.ec2_role.name
+}
+
+# --- EC2 Instance ---
+# ✅ EC2 Instance: With tags, dedicated SG, IAM instance profile, in private subnet
 resource "aws_instance" "secure_instance" {
-  # ami           = "ami-123456" # 🔴 Hardcoded/potentially insecure AMI
-  ami             = data.aws_ami.amazon_linux_2.id # ✅ Use data source for latest secure AMI (MEDIUM fix)
-  instance_type   = "t2.micro"
-  subnet_id       = aws_subnet.public.id # Deploy in a public subnet for this example, private for real apps
-  # vpc_security_group_ids = [] # 🔴 Using default SG implicitly
-  vpc_security_group_ids = [aws_security_group.secure_sg.id] # ✅ Assign dedicated security group (MEDIUM fix)
+  ami                    = "ami-0b0af3577d29bc489" # Example: Amazon Linux 2 AMI for us-east-1
+  instance_type          = "t2.micro"
+  subnet_id              = aws_subnet.private.id
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
-  # ✅ Add meaningful tags (LOW fix)
+  # Tags for identification and management
   tags = {
-    Name        = "my-secure-instance"
-    Environment = "Dev"
-    Project     = "SecurityDemo"
+    Name        = "MySecureAppInstance"
+    Environment = "Production"
+    Project     = "SecureApp"
+    Owner       = "DevOpsTeam"
   }
 }
 
-# --- EBS Volume: Encryption ---
-# ✅ Encrypted EBS volume
+# --- EBS Volume ---
+# ✅ EBS Volume: Encrypted
 resource "aws_ebs_volume" "secure_volume" {
-  availability_zone = "${var.aws_region}a"
+  availability_zone = "us-east-1a"
   size              = 8
-  # encrypted         = false # 🔴 Unencrypted EBS volume
-  encrypted         = true # ✅ Enable encryption (HIGH fix)
+  encrypted         = true # Data at rest encryption enabled
+
+  # Optionally, specify a KMS key for custom encryption:
+  # kms_key_id = aws_kms_key.ebs_kms_key.arn
 
   tags = {
-    Name        = "my-secure-ebs-volume"
-    Environment = "Dev"
+    Name        = "MySecureEBSVolume"
+    Environment = "Production"
   }
 }
 
-# --- IAM Policy: Least Privilege ---
-# ✅ IAM Policy with least privilege
-resource "aws_iam_policy" "least_privilege_policy" {
-  name        = "s3_read_only_policy"
-  description = "Allows read-only access to specific S3 bucket"
+resource "aws_volume_attachment" "ebs_att" {
+  device_name = "/dev/sdh"
+  volume_id   = aws_ebs_volume.secure_volume.id
+  instance_id = aws_instance.secure_instance.id
+}
 
-  # 🔴 IAM Policy with full access has been replaced with least privilege policy
+# --- IAM Policy ---
+# ✅ IAM Policy: Adheres to least privilege principle
+resource "aws_iam_policy" "secure_policy" {
+  name        = "secure_s3_read_policy"
+  description = "Allows read-only access to the application S3 bucket"
+
   policy = jsonencode({
     Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Action = [
-        "s3:GetObject",
-        "s3:ListBucket"
-      ],
-      Resource = [
-        aws_s3_bucket.secure_bucket.arn,
-        "${aws_s3_bucket.secure_bucket.arn}/*"
-      ]
-    }]
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ],
+        Resource = [
+          aws_s3_bucket.secure_bucket.arn,
+          "${aws_s3_bucket.secure_bucket.arn}/*"
+        ]
+      }
+    ]
   })
 }
 
-# --- RDS Instance: Secure Configuration ---
-# ✅ RDS instance in private subnet, not publicly accessible, with strong credentials, encryption, backups, and deletion protection
-resource "aws_db_subnet_group" "private_db_subnet_group" {
+# --- RDS Instance ---
+# ✅ RDS Subnet Group (required for private RDS deployment)
+resource "aws_db_subnet_group" "secure_db_subnet_group" {
   name       = "secure-db-subnet-group"
   subnet_ids = [aws_subnet.private.id]
 
   tags = {
-    Name = "Secure DB Subnet Group"
+    Name = "SecureDBSubnetGroup"
   }
 }
 
-resource "aws_security_group" "rds_sg" {
-  name        = "rds_sg"
-  description = "Allow inbound traffic to RDS from application security group"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 3306 # MySQL default port
-    to_port     = 3306
-    protocol    = "tcp"
-    security_groups = [aws_security_group.secure_sg.id] # ✅ Allow access only from app SG
-    description = "Allow MySQL from application instances"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"] # RDS instances often need outbound internet for updates, patches, etc.
-                                # Restrict if possible, but often kept open in private subnets.
-    description = "Allow all outbound traffic (restrict if possible)"
-  }
-
-  tags = {
-    Name = "secure-rds-sg"
-  }
-}
-
-# Generates a strong random password for the RDS instance
-resource "random_password" "db_master_password" {
-  length         = 16
-  special        = true
-  override_special = "!@#$%&*()-_=+[]{}<>:?"
-  min_upper      = 1
-  min_lower      = 1
-  min_numeric    = 1
-  min_special    = 1
-}
-
+# ✅ RDS Instance: Not publicly accessible, strong credentials, in private subnet, dedicated SG
 resource "aws_db_instance" "secure_db" {
   allocated_storage   = 20
   engine              = "mysql"
+  engine_version      = "8.0.32" # Specify a secure engine version
   instance_class      = "db.t2.micro"
-  db_subnet_group_name = aws_db_subnet_group.private_db_subnet_group.name
-  # publicly_accessible = true # 🔴 RDS instance exposed publicly
-  publicly_accessible = false # ✅ Deploy in private subnets only (CRITICAL fix)
-  username            = "admin"
-  # password            = "admin123" # 🔴 Weak/hardcoded credentials
-  password            = random_password.db_master_password.result # ✅ Use strong, generated password (CRITICAL fix)
-  port                = 3306
+  publicly_accessible = false # Critical: Not exposed to the internet
+  db_subnet_group_name = aws_db_subnet_group.secure_db_subnet_group.name
   vpc_security_group_ids = [aws_security_group.rds_sg.id]
 
-  # ✅ Enable storage encryption (HIGH fix)
-  storage_encrypted = true
+  username = "app_user" # Use a specific username, not 'admin'
+  password = random_password.db_password_generated.result # Use a securely generated password
 
-  # ✅ Enable automated backups (MEDIUM fix)
-  backup_retention_period = 7 # Retain backups for 7 days
-  backup_window           = "03:00-05:00"
-
-  # ✅ Enable deletion protection (MEDIUM fix)
-  deletion_protection = true
-
-  skip_final_snapshot = true # Set to false in production for data recovery
+  skip_final_snapshot = true # For demo purposes, consider 'false' for production
+  storage_encrypted   = true # Encrypt data at rest for RDS
+  multi_az            = false # For demo, set to true for production high availability
 
   tags = {
-    Name        = "my-secure-database"
-    Environment = "Dev"
+    Name        = "MySecureRDSInstance"
+    Environment = "Production"
   }
 }
 
-# --- Hardcoded Secret Variable ---
-# The original 'variable "db_password"' with a hardcoded default has been removed.
-# The RDS password is now generated dynamically by 'random_password'.
-# If a variable for a secret *were* needed, it would look like this:
-/*
-variable "some_other_secret" {
-  description = "A sensitive secret for an application."
-  type        = string
-  sensitive   = true # Mark as sensitive
-  # default = "supersecret123" # 🔴 REMOVE HARDCODED DEFAULT
+# ✅ Generated strong password for RDS (integrating with previous vulnerability)
+resource "random_password" "db_password_generated" {
+  length           = 16
+  special          = true
+  override_special = "_-.!@#$%^&*()"
+  min_upper        = 1
+  min_lower        = 1
+  min_numeric      = 1
 }
-*/
+
+# --- Variables ---
+# ✅ Variable: Sensitive, no hardcoded default
+variable "db_password_external" {
+  description = "The database password. Should be provided securely (e.g., via TF_VAR_db_password_external, .tfvars file, or fetched from a secret manager)."
+  type        = string
+  sensitive   = true # Mark as sensitive to hide from logs and UI where possible
+  # default = "supersecret123" # Removed hardcoded default
+}
+
+# Note: The 'db_password_external' variable is kept to demonstrate its correct declaration
+# but is not directly used in the 'aws_db_instance' resource above, 
+# which now uses 'random_password' for better security automation.
+# If you need to supply a pre-existing password, you would use 'db_password_external' there.
