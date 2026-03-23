@@ -1,15 +1,106 @@
-resource "aws_s3_bucket" "secure_bucket" {
-  bucket = "my-secure-bucket-123"
+provider "aws" {
+  # Remove hardcoded access_key and secret_key.
+  # Best practice is to use environment variables, shared credentials file, or IAM roles.
+  # access_key = "AKIAEXAMPLE123"
+  # secret_key = "mysecretkey123"
+  region = "us-east-1"
+}
 
-  # Ensure the bucket is private by default
-  acl = "private"
+# Data source to fetch a current Amazon Linux 2 AMI
+data "aws_ami" "amazon_linux_2" {
+  most_recent = true
+  owners      = ["amazon"]
 
-  # Enable versioning to protect against accidental deletions and overwrites
-  versioning {
-    enabled = true
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
   }
 
-  # Enforce server-side encryption for all objects at rest (using S3-managed keys by default)
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# Resource to generate a strong random password for the RDS instance
+resource "random_password" "db_master_password" {
+  length           = 16
+  special          = true
+  override_special = "_.-@"
+  keepers = {
+    # Generate a new password if the RDS instance ID changes
+    db_instance_id = "db_master_password"
+  }
+}
+
+# VPC for network isolation (if not using default VPC or custom setup)
+# For a complete secure setup, you'd typically define a full VPC with public and private subnets.
+# For this example, let's assume a default VPC or simplified setup.
+# A minimal secure setup would involve private subnets for RDS and application instances.
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "secure-vpc"
+  }
+}
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "secure-public-subnet"
+  }
+}
+
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1a"
+
+  tags = {
+    Name = "secure-private-subnet"
+  }
+}
+
+# Internet Gateway for public subnet connectivity
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "secure-igw"
+  }
+}
+
+# Route table for public subnet
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+
+  tags = {
+    Name = "secure-public-rt"
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+# 🟢 Secure S3 Bucket with encryption, versioning, and logging
+resource "aws_s3_bucket" "secure_bucket" {
+  bucket = "my-secure-bucket-unique-name-12345" # S3 bucket names must be globally unique
+
+  # 🟢 Enable default server-side encryption with SSE-S3
   server_side_encryption_configuration {
     rule {
       apply_server_side_encryption_by_default {
@@ -18,23 +109,226 @@ resource "aws_s3_bucket" "secure_bucket" {
     }
   }
 
-  # Optional: Add tags for better resource management and cost allocation
+  # 🟢 Enable versioning to protect against accidental deletion/overwrite
+  versioning {
+    enabled = true
+  }
+
   tags = {
+    Name        = "SecureBucket"
     Environment = "Production"
-    Project     = "SecureStorage"
   }
 }
 
-resource "aws_s3_bucket_public_access_block" "secure_block" {
-  bucket = aws_s3_bucket.secure_bucket.id
-
-  # Crucially, all public access blocking mechanisms must be enabled
-  # block_public_acls: Block new public ACLs and updating any existing ones to be public
-  block_public_acls = true
-  # block_public_policy: Block new public bucket policies and updating any existing ones to be public
-  block_public_policy = true
-  # ignore_public_acls: Ignore all public ACLs (granting access only through bucket policies, if allowed)
-  ignore_public_acls = true
-  # restrict_public_buckets: Restrict public bucket policies for buckets that also have public ACLs
+# 🟢 S3 Public Access Block for secure_bucket
+# This blocks public ACLs, public policies, and public access points.
+resource "aws_s3_bucket_public_access_block" "secure_bucket_public_access_block" {
+  bucket                  = aws_s3_bucket.secure_bucket.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
   restrict_public_buckets = true
 }
+
+# 🟢 Dedicated S3 bucket for access logs (best practice to be separate)
+resource "aws_s3_bucket" "log_bucket" {
+  bucket = "my-secure-log-bucket-unique-name-12345" # Must be globally unique
+
+  # Enable default server-side encryption for logs
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+
+  # Enable versioning for logs
+  versioning {
+    enabled = true
+  }
+
+  tags = {
+    Name        = "SecureLogBucket"
+    Environment = "Production"
+  }
+}
+
+# 🟢 S3 Public Access Block for log_bucket
+resource "aws_s3_bucket_public_access_block" "log_bucket_public_access_block" {
+  bucket                  = aws_s3_bucket.log_bucket.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# 🟢 Enable S3 bucket access logging for secure_bucket, targeting log_bucket
+resource "aws_s3_bucket_logging" "secure_bucket_logging" {
+  bucket        = aws_s3_bucket.secure_bucket.id
+  target_bucket = aws_s3_bucket.log_bucket.id
+  target_prefix = "log/" # Optional: add a prefix for log objects
+}
+
+# 🟢 Security Group for EC2 - only necessary ports open
+resource "aws_security_group" "secure_sg" {
+  name        = "secure_web_sg"
+  description = "Allow HTTP/HTTPS inbound and SSH from trusted IP"
+  vpc_id      = aws_vpc.main.id
+
+  # Ingress for HTTP from anywhere (if this is a web server)
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Ingress for HTTPS from anywhere (if this is a web server)
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Ingress for SSH from a specific, trusted IP (replace with your IP)
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # REMEMBER TO REPLACE with your actual trusted IP range, e.g., "203.0.113.0/32"
+  }
+
+  # Egress: allow outbound HTTP, HTTPS, and DNS
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "SecureEC2SG"
+  }
+}
+
+# 🟢 Security Group for RDS - allow traffic only from EC2 application SG
+resource "aws_security_group" "rds_sg" {
+  name        = "secure_rds_sg"
+  description = "Allow inbound MySQL/Aurora from application security group"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 3306 # MySQL/Aurora default port
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.secure_sg.id] # Only allow from the EC2 security group
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "SecureRDSSG"
+  }
+}
+
+# 🟢 EC2 instance with proper security group and tags
+resource "aws_instance" "secure_instance" {
+  ami                    = data.aws_ami.amazon_linux_2.id
+  instance_type          = "t2.micro"
+  vpc_security_group_ids = [aws_security_group.secure_sg.id]
+  subnet_id              = aws_subnet.public.id # Placed in public subnet if it's a web server
+
+  # 🟢 Add meaningful tags
+  tags = {
+    Name        = "SecureInstance"
+    Environment = "Production"
+    ManagedBy   = "Terraform"
+  }
+}
+
+# 🟢 Encrypted EBS volume
+resource "aws_ebs_volume" "secure_volume" {
+  availability_zone = "us-east-1a"
+  size              = 8
+  encrypted         = true # 🟢 Enable encryption
+
+  # 🟢 Add meaningful tags
+  tags = {
+    Name        = "SecureEBSVolume"
+    Environment = "Production"
+  }
+}
+
+# 🟢 IAM Policy with least privilege (example: S3 read-only access)
+resource "aws_iam_policy" "restricted_policy" {
+  name        = "s3_read_only_policy"
+  description = "Allows read-only access to S3 buckets managed by this account"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ],
+        Resource = [
+          "arn:aws:s3:::*",
+          "arn:aws:s3:::*/*"
+        ]
+      }
+    ]
+  })
+}
+
+# 🟢 RDS instance not publicly accessible, with strong password, in private subnet
+resource "aws_db_instance" "secure_db" {
+  allocated_storage   = 20
+  engine              = "mysql"
+  instance_class      = "db.t2.micro"
+  publicly_accessible = false # 🟢 Not publicly accessible
+  username            = "dbadmin"
+  password            = random_password.db_master_password.result # 🟢 Use random_password
+  db_subnet_group_name = aws_db_subnet_group.default.name
+  vpc_security_group_ids = [aws_security_group.rds_sg.id] # 🟢 Associate with secure RDS SG
+
+  # 🟢 Add meaningful tags
+  tags = {
+    Name        = "SecureRDSInstance"
+    Environment = "Production"
+  }
+}
+
+# RDS Subnet Group (required for non-publicly accessible RDS)
+resource "aws_db_subnet_group" "default" {
+  name       = "main-db-subnet-group"
+  subnet_ids = [aws_subnet.private.id] # 🟢 Use private subnet(s)
+
+  tags = {
+    Name = "MainDBSubnetGroup"
+  }
+}
+
+# 🟢 Remove variable "db_password" as we use random_password directly.
+# If an external secret manager were used, a variable might exist but without a default.
