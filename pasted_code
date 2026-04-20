@@ -12,6 +12,6 @@ resource "aws_instance" "web" {
 }
 
 resource "aws_s3_bucket" "data" {
-  bucket = "my-terraform-bucket"
-  acl    = "private"
+  bucket           = "my-terraform-bucket"
+  object_ownership = "BucketOwnerEnforced"
 }
